@@ -28,18 +28,8 @@ import {
   AlertCircle,
   Users,
   BarChart3,
-  Download,
-  Check,
 } from "lucide-react";
-import { generateReportPDF } from "@/lib/report-pdf";
-import {
-  buildReadinessSummary,
-  tierFromScore,
-  type ReportData,
-} from "@/lib/report-data";
-import { toast } from "sonner";
-import { ExportBar } from "@/components/export-bar";
-import CalibrationPanel from "@/components/calibration-panel";
+import { JobDemandSection } from "@/components/job-demand-section";
 
 // ────────────────────────────────────────────
 // Route definition
@@ -126,6 +116,7 @@ const COUNTRY_META: Record<
   GHA: { flag: "🇬🇭", greeting: "Ɛte sɛn! 👋", name: "Ghana" },
   KEN: { flag: "🇰🇪", greeting: "Habari! 👋", name: "Kenya" },
   ZAF: { flag: "🇿🇦", greeting: "Sawubona! 👋", name: "South Africa" },
+  BGD: { flag: "🇧🇩", greeting: "স্বাগতম! 👋", name: "Bangladesh" },
   IND: { flag: "🇮🇳", greeting: "Namaste! 👋", name: "India" },
   EGY: { flag: "🇪🇬", greeting: "!أهلاً 👋", name: "Egypt" },
   ETH: { flag: "🇪🇹", greeting: "ሰላም! 👋", name: "Ethiopia" },
@@ -473,6 +464,7 @@ function ErrorState({ message }: { message: string }) {
 
 function ResultsDashboard() {
   const { t } = useI18n();
+
   const [onboarding] = useOnboarding();
   const [queryData, setQueryData] = useState<QueryResponse | null>(null);
   const [recalData, setRecalData] = useState<RecalibrationOccupation | null>(
@@ -481,12 +473,10 @@ function ResultsDashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pathwaySort, setPathwaySort] = useState<SortKey>("overlap");
-  const [pdfState, setPdfState] = useState<"idle" | "generating" | "done" | "error">("idle");
 
   const country = onboarding.country || "NGA";
   const isco08 = onboarding.isco08 || "7422";
   const occupationLabel = onboarding.isco08_label || "Your Occupation";
-  const userName = (onboarding.name || "").trim();
   const meta = COUNTRY_META[country] ?? {
     flag: "🌍",
     greeting: "Welcome! 👋",
@@ -543,105 +533,19 @@ function ResultsDashboard() {
     }
   }, [queryData?.adjacency_pathways, pathwaySort]);
 
-  // ── Build a unified report model from current screen state ──
-  // This is the single source of truth for PDF / JSON / shareable-link exports.
-  const reportData: ReportData | null = useMemo(() => {
-    if (!queryData) return null;
-    const riskScore =
-      recalData?.recalibrated_probability ??
-      queryData.ai_risk.recalibrated ??
-      0;
-    const tier = recalData?.risk_tier ?? queryData.ai_risk.tier ?? tierFromScore(riskScore);
-    const taskBreakdown = recalData?.task_risk_breakdown ?? {};
-    const topRisks = Object.entries(taskBreakdown).map(([k, v]) => ({
-      category: k,
-      label: TASK_CATEGORIES[k]?.label ?? k.replace(/_/g, " "),
-      share: v.share,
-      risk: v.risk,
-    }));
-    // Durable skills = informal_skills the user reported, with the lowest-risk task labels appended if sparse.
-    const durableSkills = (onboarding.informal_skills ?? []).slice(0, 6);
-    if (durableSkills.length < 3) {
-      const lowRiskLabels = [...topRisks]
-        .sort((a, b) => a.risk - b.risk)
-        .slice(0, 3 - durableSkills.length)
-        .map(r => r.label);
-      durableSkills.push(...lowRiskLabels);
-    }
-    const pathways = (queryData.adjacency_pathways ?? []).map(p => ({
-      title: p.target_title,
-      isco08: p.target_isco08,
-      overlapPct: p.skill_overlap_pct,
-      missingSkills: p.missing_skills_count,
-      wageUpliftPct: p.wage_uplift_pct,
-      trainingCost: p.training_cost_tier,
-      gapDescription: p.gap_description,
-    }));
-    return {
-      generatedAt: new Date().toISOString(),
-      profileLabel: userName || occupationLabel,
-      occupationTitle: occupationLabel,
-      isco08,
-      countryCode: country,
-      countryName: meta.name,
-      educationLevel: onboarding.education_level || undefined,
-      experienceYears: onboarding.experience_years || undefined,
-      durableSkills,
-      readiness: {
-        riskScore,
-        tier,
-        summary: buildReadinessSummary(tier),
-        originalFreyOsborne: recalData?.original_frey_osborne,
-      },
-      topRisks,
-      pathways,
-      labourMarket: {
-        totalJobs: queryData.demand_signals?.total_jobs,
-        avgSalary: queryData.demand_signals?.avg_salary_ngn,
-        currencySymbol: country === "NGA" ? "₦" : country === "GHA" ? "GH₵ " : "",
-        labourForceParticipationPct: queryData.econometric_signals?.labour_force_participation_pct,
-        youthUnemploymentPct: queryData.econometric_signals?.youth_unemployment_pct,
-        topSectors: queryData.demand_signals?.sector_growth?.map(s => ({
-          sector: s.sector, growthPct: s.growth_pct,
-        })),
-      },
-      notes: recalData?.narrative ? [recalData.narrative] : [],
-      dataLimitations: queryData.data_limitations ?? [],
-    };
-  }, [queryData, recalData, onboarding, occupationLabel, isco08, country, meta.name]);
-
-  const handleDownloadPDF = async () => {
-    if (!reportData) return;
-    setPdfState("generating");
-    try {
-      const filename = await generateReportPDF(reportData);
-      setPdfState("done");
-      toast.success("Report downloaded", { description: filename });
-      setTimeout(() => setPdfState("idle"), 2500);
-    } catch (err) {
-      console.error("PDF generation failed", err);
-      setPdfState("error");
-      toast.error("Couldn’t generate the PDF", {
-        description: "Please try again.",
-        action: { label: "Retry", onClick: () => handleDownloadPDF() },
-      });
-    }
-  };
-
   // ── Render ──
   return (
     <PageShell
       eyebrow="Results"
       title={
         <>
-          {meta.flag} {userName ? `${userName} · ` : ""}{occupationLabel}
+          {meta.flag} {occupationLabel}
         </>
       }
       lede={
         <>
-          {userName ? `Hi ${userName} — ` : `${meta.greeting} `}
-          here&rsquo;s your personalised AI readiness assessment for{" "}
-          <strong>{meta.name}</strong>.
+          {meta.greeting} Here&rsquo;s your personalised AI readiness
+          assessment for <strong>{meta.name}</strong>.
         </>
       }
     >
@@ -650,41 +554,7 @@ function ResultsDashboard() {
       ) : error ? (
         <ErrorState message={error} />
       ) : (
-        <>
-          {/* Export actions — shown above the printable target so they don't appear in PDF/print */}
-          <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
-            <p className="text-xs text-muted-foreground">
-              Save, share or scan a QR for this report.
-            </p>
-            <ExportBar
-              printTargetId="results-export-target"
-              filenameStem={`unmapped-${(occupationLabel || "report").toLowerCase().replace(/\s+/g, "-")}`}
-            />
-          </div>
-
-          <div id="results-export-target" className="space-y-14">
-          {/* ── Real signals badge row (visible-not-buried per brief M3) ── */}
-          <div className="flex flex-wrap items-center gap-2 rounded-sm border border-cobalt/30 bg-cobalt/5 px-4 py-3">
-            <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.18em] text-cobalt">
-              Live signals on this page ·
-            </span>
-            {[
-              "Avg salary",
-              "Youth unemployment",
-              "Labour-force participation",
-              "Sector growth",
-              "Frey-Osborne (LMIC-recalibrated)",
-              "ESCO-mapped pathways",
-            ].map(s => (
-              <span
-                key={s}
-                className="rounded-full border border-cobalt/30 bg-paper px-2.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-cobalt"
-              >
-                {s}
-              </span>
-            ))}
-          </div>
-
+        <div className="space-y-14">
           {/* ── Profile Card ── */}
           <section>
             <ProfileCard
@@ -718,44 +588,6 @@ function ResultsDashboard() {
                   : undefined
               }
             />
-          </section>
-
-          {/* ── Export actions ── */}
-          <section className="flex flex-wrap items-center justify-between gap-3 -mt-4">
-            <p className="text-xs text-muted-foreground">
-              Save a one-page summary you can print, email, or share with an employer or trainer.
-            </p>
-            <button
-              type="button"
-              onClick={handleDownloadPDF}
-              disabled={!reportData || pdfState === "generating"}
-              className={cn(
-                "inline-flex items-center gap-2 rounded-md border-2 border-ink px-4 py-2 font-mono text-xs uppercase tracking-wider transition-colors disabled:opacity-60",
-                pdfState === "done"
-                  ? "bg-cobalt text-paper"
-                  : "bg-paper text-ink hover:bg-cobalt hover:text-paper hover:border-cobalt",
-              )}
-              aria-live="polite"
-            >
-              {pdfState === "generating" ? (
-                <>
-                  <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                  Preparing PDF…
-                </>
-              ) : pdfState === "done" ? (
-                <>
-                  <Check className="h-4 w-4" /> Downloaded
-                </>
-              ) : pdfState === "error" ? (
-                <>
-                  <AlertCircle className="h-4 w-4" /> Retry download
-                </>
-              ) : (
-                <>
-                  <Download className="h-4 w-4" /> Download PDF
-                </>
-              )}
-            </button>
           </section>
 
           {/* ── Section 1: AI Readiness Gauge ── */}
@@ -820,7 +652,7 @@ function ResultsDashboard() {
                 How your occupation&rsquo;s tasks split across categories, and
                 the automation risk for each.
               </p>
-              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              <div className={"grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3"}>
                 {Object.entries(recalData.task_risk_breakdown).map(
                   ([key, val]) => (
                     <TaskCard
@@ -834,6 +666,13 @@ function ResultsDashboard() {
               </div>
             </section>
           )}
+
+          {/* ── Job Demand Signals ── */}
+          <JobDemandSection
+            country={country}
+            countryName={meta.name}
+            userIsco08={isco08}
+          />
 
           {/* ── Section 3: Transition Pathways ── */}
           {sortedPathways.length > 0 && (
@@ -872,7 +711,7 @@ function ResultsDashboard() {
                   </button>
                 ))}
               </div>
-              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              <div className={"grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3"}>
                 {sortedPathways.map((pw) => (
                   <PathwayCard
                     key={pw.target_isco08}
@@ -895,7 +734,7 @@ function ResultsDashboard() {
               Practical next steps to act on your results — whether you want to
               upskill, find work, or share your profile.
             </p>
-            <div className="grid gap-4 sm:grid-cols-3">
+            <div className={"grid grid-cols-1 gap-4 sm:grid-cols-3"}>
               {/* Get Trained */}
               <Card>
                 <CardHeader className="pb-2">
@@ -1030,7 +869,7 @@ function ResultsDashboard() {
                   {t('results.demand.title', 'Demand for Your Skills')}
                 </h2>
               </div>
-              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              <div className={"grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3"}>
                 {/* Total jobs */}
                 <Card>
                   <CardHeader className="pb-2">
@@ -1185,13 +1024,7 @@ function ResultsDashboard() {
               </div>
             </section>
           )}
-          </div>
-
-          {/* Calibration honesty panel — embedded, compact */}
-          <section className="mt-12">
-            <CalibrationPanel country={country} embedded compact />
-          </section>
-        </>
+        </div>
       )}
     </PageShell>
   );

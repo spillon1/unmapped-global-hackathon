@@ -306,7 +306,7 @@ function Passport() {
           <span>Step {step} of {TOTAL_STEPS_WITH_INTRO}</span>
           <span>{Math.round((step / TOTAL_STEPS_WITH_INTRO) * 100)}%</span>
         </div>
-        <div className="mt-2 h-1.5 w-full rounded-full bg-line">
+        <div className="mt-2 w-full rounded-full bg-line h-2.5 md:h-1.5">
           <div
             className="h-full rounded-full bg-cobalt transition-all duration-500 ease-out"
             style={{ width: `${(step / TOTAL_STEPS_WITH_INTRO) * 100}%` }}
@@ -315,7 +315,7 @@ function Passport() {
       </div>
 
       {/* Step content */}
-      <div className="mx-auto max-w-2xl">
+      <div className="mx-auto max-w-full px-1 md:max-w-2xl md:px-0">
         <div
           className={`transition-all duration-250 ease-out ${
             animating

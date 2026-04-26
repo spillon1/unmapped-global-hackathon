@@ -449,7 +449,7 @@ function CrosswalkExplorer() {
       </div>
 
       {/* ── Main content: flow diagram + sidebar ─────────── */}
-      <div className="grid gap-6 lg:grid-cols-[1fr_280px]">
+      <div className={`grid gap-6 $"grid-cols-1 lg:grid-cols-[1fr_280px]"`}>
         {/* Left: Taxonomy flow + skills */}
         <div className="min-w-0 space-y-6">
           {/* Flow diagram */}
@@ -460,7 +460,7 @@ function CrosswalkExplorer() {
             {loading ? (
               <FlowSkeleton />
             ) : data ? (
-              <div className="flex flex-col gap-2 md:flex-row md:items-stretch md:gap-0">
+              <div className={`flex flex-col gap-2 md:flex-row md:items-stretch md:gap-0 $""`}>
                 <FlowColumn
                   title="SOC Codes"
                   badge="US BLS · SOC 2018"

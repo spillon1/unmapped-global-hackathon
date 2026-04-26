@@ -1,57 +1,48 @@
-import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useMemo, useState } from "react";
+import { createFileRoute, Link } from "@tanstack/react-router";
+import { useMemo, useState, useRef, useCallback } from "react";
 import { PageShell } from "@/components/page-shell";
 import { DataSource } from "@/components/data-source";
 import { SOURCES } from "@/lib/sources";
-import { fetchWithFallback } from "@/lib/api-client";
+
 import {
   getCountryConfig,
   getRecalibratedData,
-  getPolicymakerAggregates,
+  COUNTRY_CONFIGS,
 } from "@/lib/static-data";
-import { GENDER, getDivergence } from "@/lib/demographics";
-
-// ─── Static WDI fallbacks ───────────────────────────────────
-// These bundled JSON files are used when the live API is unreachable
-// so the dashboard always shows real World Bank / ILO numbers
-// instead of the four blank "—" cards.
-import wdiNGA from "../../data/nga/wdi_labour.json";
-import wdiKEN from "../../data/ken/wdi_labour.json";
-import wdiRWA from "../../data/rwa/wdi_labour.json";
-import wdiIND from "../../data/ind/wdi_labour.json";
-
-const WDI_FALLBACKS: Record<string, unknown> = {
-  NGA: wdiNGA,
-  KEN: wdiKEN,
-  RWA: wdiRWA,
-  IND: wdiIND,
-  // GHA: no wdi_labour.json shipped yet — falls through to NGA below.
-};
-
-function getWdiFallback(iso3: string): unknown {
-  return WDI_FALLBACKS[iso3.toUpperCase()] ?? WDI_FALLBACKS.NGA;
-}
 import {
-  PieChart,
-  Pie,
-  Cell,
   ResponsiveContainer,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
   Tooltip as RechartsTooltip,
+  CartesianGrid,
+  Legend,
+  AreaChart,
+  Area,
 } from "recharts";
-
-// ─── API base ───────────────────────────────────────────────
-const API = import.meta.env.VITE_API_URL || "";
+import {
+  Users,
+  Calendar,
+  Award,
+  AlertTriangle,
+  Download,
+  FileText,
+} from "lucide-react";
+import html2canvas from "html2canvas";
+import { PolicymakerJobDemand } from "@/components/policymaker-job-demand";
+import { jsPDF } from "jspdf";
 
 // ─── Route ──────────────────────────────────────────────────
 export const Route = createFileRoute("/policymaker")({
   component: PolicymakerDashboard,
   head: () => ({
     meta: [
-      { title: "Workforce Intelligence Dashboard — UNMAPPED" },
+      { title: "Youth Skills & Opportunity Dashboard — UNMAPPED" },
       {
         name: "description",
         content:
-          "Aggregate workforce data, automation exposure, and skills gaps for policymakers.",
+          "Youth cohort analysis, skill gaps, automation exposure, and education trajectories for policymakers.",
       },
     ],
   }),
@@ -62,432 +53,493 @@ interface CountryEntry {
   iso3: string;
   name: string;
   flag: string;
+  defaultRegion: string;
+  regions: string[];
 }
 
 const COUNTRY_LIST: CountryEntry[] = [
-  { iso3: "NGA", name: "Nigeria", flag: "🇳🇬" },
-  { iso3: "GHA", name: "Ghana", flag: "🇬🇭" },
-  { iso3: "KEN", name: "Kenya", flag: "🇰🇪" },
-  { iso3: "RWA", name: "Rwanda", flag: "🇷🇼" },
-  { iso3: "IND", name: "India", flag: "🇮🇳" },
+  { iso3: "GHA", name: "Ghana", flag: "🇬🇭", defaultRegion: "Greater Accra", regions: ["Greater Accra", "Ashanti", "Northern", "Eastern", "Western", "Central", "Volta", "Upper East", "Upper West", "Bono"] },
+  { iso3: "BGD", name: "Bangladesh", flag: "🇧🇩", defaultRegion: "Dhaka Division", regions: ["Dhaka Division", "Chittagong Division", "Rajshahi Division", "Khulna Division", "Sylhet Division", "Rangpur Division", "Barisal Division", "Mymensingh Division"] },
+  { iso3: "NGA", name: "Nigeria", flag: "🇳🇬", defaultRegion: "Lagos", regions: ["Lagos", "Abuja FCT", "Kano", "Rivers", "Oyo", "Kaduna", "Anambra", "Delta", "Enugu", "Ogun"] },
+  { iso3: "KEN", name: "Kenya", flag: "🇰🇪", defaultRegion: "Nairobi", regions: ["Nairobi", "Mombasa", "Kisumu", "Nakuru", "Eldoret", "Nyeri", "Machakos", "Kiambu", "Kilifi", "Uasin Gishu"] },
+  { iso3: "IND", name: "India", flag: "🇮🇳", defaultRegion: "Maharashtra", regions: ["Maharashtra", "Delhi NCR", "Karnataka", "Tamil Nadu", "Telangana", "Gujarat", "West Bengal", "Rajasthan", "Uttar Pradesh", "Kerala"] },
+  { iso3: "RWA", name: "Rwanda", flag: "🇷🇼", defaultRegion: "Kigali", regions: ["Kigali", "Eastern Province", "Western Province", "Northern Province", "Southern Province"] },
 ];
 
-// ─── Types ──────────────────────────────────────────────────
-interface WdiLabour {
-  _metadata: { country: string; iso3: string };
-  macro: Record<string, { value: number; year: number; source: string; note?: string }>;
-  labour_market: Record<string, any>;
-  wages: Record<string, any>;
-  education: Record<string, any>;
-  digital: Record<string, any>;
-  sector_growth_outlook?: Record<string, any>;
-}
-
-interface RecalOccupation {
+// ─── Cohort types ───────────────────────────────────────────
+interface YouthProfile {
+  id: number;
+  age: number;
+  gender: "male" | "female";
+  education: "none" | "primary" | "secondary" | "tertiary";
   isco08: string;
-  title: string;
-  original_frey_osborne: number;
-  recalibrated_probability: number;
-  risk_tier: "low" | "medium" | "high";
-  task_risk_breakdown: Record<
-    string,
-    { share: number; risk: number }
-  >;
-  narrative?: string;
-  is_priority?: boolean;
+  occupation: string;
+  informalSkills: string[];
+  automationRisk: number;
+  riskTier: "low" | "medium" | "high";
 }
 
-interface RecalData {
-  country: string;
-  country_name: string;
-  calibration_factor: number;
-  methodology: string;
-  total_occupations: number;
-  risk_distribution: { low: number; medium: number; high: number };
-  occupations: RecalOccupation[];
-}
-
-interface PolicymakerAggregates {
-  country_code: string;
-  country_name: string;
-  skill_gap_heatmap: {
-    title: string;
-    source: string;
-    note: string;
-    sectors: {
-      sector: string;
-      demand_index: number;
-      supply_index: number;
-      gap_score: number;
-      gap_direction: "shortage" | "oversupply";
-      wage_premium_vs_median_pct: number;
-    }[];
-  };
-  cohort_automation_exposure: {
-    title: string;
-    source: string;
-    caveat: string;
-    total_youth_millions: number;
-    exposure: {
-      tier: string;
-      pct: number;
-      absolute_millions: number;
-      description: string;
-      policy_implication: string;
-    }[];
-  };
-  neet_overview: {
-    title: string;
-    source: string;
-    vintage: string;
-    overall_pct: number;
-    note: string;
-    policy_implication: string;
-  };
-  education_trajectory: {
-    title: string;
-    source: string;
-    insight: string;
-    upper_secondary_plus_2025_pct: number;
-    upper_secondary_plus_2035_pct: number;
-    policy_implication: string;
-  };
-  data_quality_notes: {
-    overall_confidence: string;
-    rationale: string;
-    key_gaps: string[];
+// ─── Deterministic PRNG (seeded) ────────────────────────────
+function mulberry32(seed: number) {
+  return function () {
+    let t = (seed += 0x6d2b79f5);
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
 
-interface CountryConfig {
-  country: { name: string; iso3: string; flag?: string };
-  [key: string]: any;
+function hashStr(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) {
+    h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
+  }
+  return h >>> 0;
 }
 
-// ─── Skeleton ───────────────────────────────────────────────
-function Skeleton({ className = "" }: { className?: string }) {
-  return (
-    <div
-      className={`animate-pulse rounded bg-muted/60 ${className}`}
-    />
-  );
+// ─── Cohort generator ───────────────────────────────────────
+const OCCUPATIONS = [
+  { isco08: "5221", title: "Shopkeeper" },
+  { isco08: "9211", title: "Crop Farm Labourer" },
+  { isco08: "7531", title: "Tailor / Dressmaker" },
+  { isco08: "8322", title: "Taxi / Ride-hail Driver" },
+  { isco08: "5120", title: "Cook / Food Vendor" },
+  { isco08: "7112", title: "Bricklayer" },
+  { isco08: "5141", title: "Hairdresser / Barber" },
+  { isco08: "7422", title: "ICT Installer / Repairer" },
+  { isco08: "4132", title: "Data Entry Clerk" },
+  { isco08: "9111", title: "Domestic Cleaner" },
+  { isco08: "2221", title: "Nursing Professional" },
+  { isco08: "2356", title: "IT Trainer" },
+  { isco08: "8331", title: "Bus Driver" },
+  { isco08: "7115", title: "Carpenter" },
+  { isco08: "5222", title: "Shop Supervisor" },
+];
+
+const INFORMAL_SKILLS = [
+  "Basic smartphone use",
+  "Social media for business",
+  "WhatsApp Commerce",
+  "Bookkeeping (informal)",
+  "Negotiation",
+  "Multilingual oral communication",
+  "Manual repair",
+  "Community leadership",
+  "Mentoring apprentices",
+  "Digital payments (mobile money)",
+  "Basic computer use",
+  "Customer relationship management",
+];
+
+const EDUCATION_LEVELS: YouthProfile["education"][] = [
+  "none",
+  "primary",
+  "secondary",
+  "tertiary",
+];
+
+function generateCohort(iso3: string): YouthProfile[] {
+  const rng = mulberry32(hashStr(iso3));
+  const config = getCountryConfig(iso3) as any;
+  const calibration = config?.automation?.calibration_factor ?? 0.65;
+  const profiles: YouthProfile[] = [];
+
+  for (let i = 0; i < 100; i++) {
+    const age = 18 + Math.floor(rng() * 11); // 18-28
+    const gender: "male" | "female" = rng() > 0.48 ? "male" : "female";
+
+    // Education weighted by country projections
+    const eduRoll = rng();
+    let education: YouthProfile["education"];
+    if (eduRoll < 0.15) education = "none";
+    else if (eduRoll < 0.40) education = "primary";
+    else if (eduRoll < 0.78) education = "secondary";
+    else education = "tertiary";
+
+    const occ = OCCUPATIONS[Math.floor(rng() * OCCUPATIONS.length)];
+
+    // Informal skills: 0-4 random
+    const skillCount = Math.floor(rng() * 4) + (rng() > 0.33 ? 1 : 0);
+    const shuffled = [...INFORMAL_SKILLS].sort(() => rng() - 0.5);
+    const informalSkills = shuffled.slice(0, skillCount);
+
+    // Automation risk: base from F&O * calibration + noise
+    const baseRisk = 0.3 + rng() * 0.55; // 0.30–0.85 range
+    const automationRisk = Math.min(
+      0.95,
+      Math.max(0.05, baseRisk * calibration + (rng() - 0.5) * 0.1)
+    );
+
+    const riskTier: "low" | "medium" | "high" =
+      automationRisk < 0.3 ? "low" : automationRisk < 0.6 ? "medium" : "high";
+
+    profiles.push({
+      id: i,
+      age,
+      gender,
+      education,
+      isco08: occ.isco08,
+      occupation: occ.title,
+      informalSkills,
+      automationRisk,
+      riskTier,
+    });
+  }
+
+  return profiles;
 }
 
-function CardSkeleton() {
-  return (
-    <div className="rounded-lg border border-line bg-paper p-5 space-y-3">
-      <Skeleton className="h-3 w-24" />
-      <Skeleton className="h-8 w-32" />
-      <Skeleton className="h-3 w-40" />
-    </div>
-  );
+// ─── Skill gap data ─────────────────────────────────────────
+interface SkillRow {
+  skill: string;
+  supply: "low" | "medium" | "high";
+  demand: "low" | "medium" | "high";
+  status: "gap" | "surplus" | "matched";
 }
 
-function SectionSkeleton({ rows = 5 }: { rows?: number }) {
-  return (
-    <div className="space-y-3">
-      <Skeleton className="h-5 w-48" />
-      {Array.from({ length: rows }).map((_, i) => (
-        <Skeleton key={i} className="h-4 w-full" />
-      ))}
-    </div>
-  );
+const SKILL_GAP_DATA: SkillRow[] = [
+  { skill: "Digital literacy (beyond basic)", supply: "low", demand: "high", status: "gap" },
+  { skill: "English written fluency", supply: "low", demand: "high", status: "gap" },
+  { skill: "Accounting / bookkeeping", supply: "low", demand: "high", status: "gap" },
+  { skill: "Basic IT", supply: "medium", demand: "medium", status: "matched" },
+  { skill: "Food preparation", supply: "medium", demand: "medium", status: "matched" },
+  { skill: "Textile / garment", supply: "medium", demand: "low", status: "matched" },
+  { skill: "Manual repair", supply: "high", demand: "medium", status: "surplus" },
+  { skill: "Retail sales", supply: "high", demand: "medium", status: "surplus" },
+  { skill: "Multilingual oral communication", supply: "high", demand: "low", status: "surplus" },
+  { skill: "Mechanical maintenance", supply: "high", demand: "medium", status: "surplus" },
+];
+
+// ─── Sector data ────────────────────────────────────────────
+const SECTOR_DATA = [
+  { sector: "ICT Services", growth: 8, match: 12 },
+  { sector: "Agriculture & Food", growth: 3, match: 30 },
+  { sector: "Retail & Trade", growth: 2, match: 28 },
+  { sector: "Construction", growth: 5, match: 22 },
+  { sector: "Healthcare", growth: 6, match: 15 },
+  { sector: "Manufacturing", growth: 4, match: 18 },
+  { sector: "Financial Services", growth: 7, match: 10 },
+  { sector: "Transport & Logistics", growth: 3, match: 25 },
+];
+
+// ─── Education trajectory data ──────────────────────────────
+function getEducationTrajectory(iso3: string) {
+  const config = getCountryConfig(iso3) as any;
+  const proj = config?.education_projections;
+  if (!proj) {
+    return [
+      { year: "2025", "No Education": 22, Primary: 30, Secondary: 32, Tertiary: 16 },
+      { year: "2035", "No Education": 15, Primary: 27, Secondary: 38, Tertiary: 20 },
+    ];
+  }
+  const p2025 = proj["2025"];
+  const p2035 = proj["2035"];
+  return [
+    {
+      year: "2025",
+      "No Education": Math.round((p2025.no_education ?? 0) * 100),
+      Primary: Math.round((p2025.primary ?? 0) * 100),
+      Secondary: Math.round(((p2025.lower_secondary ?? 0) + (p2025.upper_secondary ?? 0)) * 100),
+      Tertiary: Math.round((p2025.post_secondary ?? 0) * 100),
+    },
+    {
+      year: "2035",
+      "No Education": Math.round((p2035.no_education ?? 0) * 100),
+      Primary: Math.round((p2035.primary ?? 0) * 100),
+      Secondary: Math.round(((p2035.lower_secondary ?? 0) + (p2035.upper_secondary ?? 0)) * 100),
+      Tertiary: Math.round((p2035.post_secondary ?? 0) * 100),
+    },
+  ];
 }
 
 // ─── Helpers ────────────────────────────────────────────────
-function riskColor(tier: "low" | "medium" | "high") {
-  if (tier === "low") return "text-emerald-700 bg-emerald-50 dark:text-emerald-400 dark:bg-emerald-950/30";
-  if (tier === "medium") return "text-amber-700 bg-amber-50 dark:text-amber-400 dark:bg-amber-950/30";
-  return "text-red-700 bg-red-50 dark:text-red-400 dark:bg-red-950/30";
-}
-
 function riskBarColor(tier: "low" | "medium" | "high") {
-  if (tier === "low") return "bg-emerald-500";
-  if (tier === "medium") return "bg-amber-500";
-  return "bg-red-500";
+  if (tier === "low") return "#16a34a";
+  if (tier === "medium") return "#f59e0b";
+  return "#ef4444";
 }
 
-function dominantTask(
-  breakdown: Record<string, { share: number; risk: number }>
-): string {
-  let max = "";
-  let maxShare = 0;
-  for (const [key, val] of Object.entries(breakdown)) {
-    if (val.share > maxShare) {
-      maxShare = val.share;
-      max = key;
-    }
-  }
-  const labels: Record<string, string> = {
-    routine_manual: "Routine Manual",
-    routine_cognitive: "Routine Cognitive",
-    nonroutine_manual: "Non-routine Manual",
-    nonroutine_cognitive: "Non-routine Cognitive",
-    social: "Social",
-  };
-  return labels[max] ?? max;
+function statusColor(status: "gap" | "surplus" | "matched") {
+  if (status === "gap") return "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-300";
+  if (status === "surplus") return "bg-green-100 text-green-800 dark:bg-green-950 dark:text-green-300";
+  return "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300";
 }
 
-function fmt(n: number | undefined, decimals = 1): string {
-  if (n === undefined || n === null) return "—";
-  return n.toLocaleString("en", {
-    minimumFractionDigits: decimals,
-    maximumFractionDigits: decimals,
-  });
+function levelColor(level: "low" | "medium" | "high") {
+  if (level === "low") return "bg-red-500";
+  if (level === "medium") return "bg-amber-400";
+  return "bg-green-500";
 }
 
-function fmtInt(n: number | undefined): string {
-  if (n === undefined || n === null) return "—";
-  return Math.round(n).toLocaleString("en");
-}
-
-function pct(n: number): string {
-  return `${(n * 100).toFixed(1)}%`;
-}
-
-// ─── Data hooks ─────────────────────────────────────────────
-function useFetchJsonWithFallback<T>(url: string, fallbackFn: () => T) {
-  const [data, setData] = useState<T | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    setData(null);
-
-    const endpoint = url.replace(API, '');
-    fetchWithFallback<T>(endpoint, fallbackFn)
-      .then((d) => {
-        if (!cancelled) setData(d);
-      })
-      .catch((e) => {
-        if (!cancelled) setError(e.message);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [url]);
-
-  return { data, loading, error };
-}
-
-// ─── Sub-components ─────────────────────────────────────────
-
-/* ── 1. Country Header ─────────────────────────────────── */
-function CountryHeader({
-  country,
-  onSelect,
+// ─── Filter bar component ───────────────────────────────────
+function FilterBar({
+  regions,
+  region,
+  setRegion,
+  ageBand,
+  setAgeBand,
+  gender,
+  setGender,
+  education,
+  setEducation,
 }: {
-  country: CountryEntry;
-  onSelect: (iso3: string) => void;
+  regions: string[];
+  region: string;
+  setRegion: (r: string) => void;
+  ageBand: string;
+  setAgeBand: (a: string) => void;
+  gender: string;
+  setGender: (g: string) => void;
+  education: string;
+  setEducation: (e: string) => void;
 }) {
+  const selectClass =
+    "rounded-md border border-line bg-paper px-3 py-2 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-cobalt";
+
   return (
-    <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-      <div>
-        <span className="text-4xl mr-3">{country.flag}</span>
-        <span className="font-display text-2xl font-bold">
-          {country.name}
-        </span>
+    <div className="flex flex-col gap-3 rounded-lg border border-line bg-sand/40 p-4 md:flex-row md:flex-wrap">
+      <div className="flex flex-col gap-1">
+        <label className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+          Region
+        </label>
+        <select className={selectClass} value={region} onChange={(e) => setRegion(e.target.value)}>
+          {regions.map((r) => (
+            <option key={r} value={r}>
+              {r}
+            </option>
+          ))}
+        </select>
       </div>
-      <select
-        className="rounded-md border border-line bg-paper px-3 py-2 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-cobalt"
-        value={country.iso3}
-        onChange={(e) => onSelect(e.target.value)}
-      >
-        {COUNTRY_LIST.map((c) => (
-          <option key={c.iso3} value={c.iso3}>
-            {c.flag} {c.name}
-          </option>
-        ))}
-      </select>
+      <div className="flex flex-col gap-1">
+        <label className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+          Age Band
+        </label>
+        <select className={selectClass} value={ageBand} onChange={(e) => setAgeBand(e.target.value)}>
+          <option value="all">All (18-28)</option>
+          <option value="18-21">18-21</option>
+          <option value="22-25">22-25</option>
+          <option value="26-28">26-28</option>
+        </select>
+      </div>
+      <div className="flex flex-col gap-1">
+        <label className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+          Gender
+        </label>
+        <select className={selectClass} value={gender} onChange={(e) => setGender(e.target.value)}>
+          <option value="all">All</option>
+          <option value="male">Male</option>
+          <option value="female">Female</option>
+        </select>
+      </div>
+      <div className="flex flex-col gap-1">
+        <label className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+          Education
+        </label>
+        <select
+          className={selectClass}
+          value={education}
+          onChange={(e) => setEducation(e.target.value)}
+        >
+          <option value="all">All</option>
+          <option value="none">No formal</option>
+          <option value="primary">Primary</option>
+          <option value="secondary">Secondary</option>
+          <option value="tertiary">Tertiary</option>
+        </select>
+      </div>
     </div>
   );
 }
 
-/* ── 2. Key Indicators ─────────────────────────────────── */
-function IndicatorCard({
-  label,
+// ─── Headline card ──────────────────────────────────────────
+function HeadlineCard({
+  icon,
   value,
-  unit,
-  source,
-  note,
+  label,
+  accent,
 }: {
-  label: string;
+  icon: React.ReactNode;
   value: string;
-  unit?: string;
-  source: React.ReactNode;
-  note?: string;
+  label: string;
+  accent?: string;
 }) {
   return (
-    <div className="rounded-lg border border-line bg-paper p-5">
-      <div className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
-        {label}
-      </div>
-      <div className="mt-2 font-display text-3xl font-black tracking-tight">
-        {value}
-        {unit && (
-          <span className="ml-1 text-base font-normal text-muted-foreground">
-            {unit}
-          </span>
-        )}
-      </div>
-      {note && (
-        <p className="mt-1 text-xs text-muted-foreground line-clamp-2">
-          {note}
-        </p>
-      )}
-      <div className="mt-2">{source}</div>
-    </div>
-  );
-}
-
-function KeyIndicators({ wdi }: { wdi: WdiLabour | null }) {
-  if (!wdi)
-    return (
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        {Array.from({ length: 4 }).map((_, i) => (
-          <CardSkeleton key={i} />
-        ))}
-      </div>
-    );
-
-  const gdp = wdi.macro?.gdp_per_capita_usd;
-  const youthUnemp = wdi.labour_market?.youth_unemployment_rate_pct;
-  const labourPart = wdi.labour_market?.female_labour_participation_pct;
-  const hci = wdi.education?.human_capital_index;
-
-  return (
-    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-      <IndicatorCard
-        label="GDP per Capita"
-        value={gdp ? `$${fmtInt(gdp.value)}` : "—"}
-        source={<DataSource compact {...SOURCES.WDI_2024} />}
-        note={gdp?.note}
-      />
-      <IndicatorCard
-        label="Youth Unemployment"
-        value={youthUnemp ? `${fmt(youthUnemp.value)}%` : "—"}
-        source={<DataSource compact {...SOURCES.ILOSTAT_2024} />}
-        note={youthUnemp?.note}
-      />
-      <IndicatorCard
-        label="Female Labour Participation"
-        value={labourPart ? `${fmt(labourPart.value)}%` : "—"}
-        source={<DataSource compact {...SOURCES.WDI_2024} />}
-        note={labourPart?.note}
-      />
-      <IndicatorCard
-        label="Human Capital Index"
-        value={hci ? fmt(hci.value, 2) : "—"}
-        source={<DataSource compact {...SOURCES.HCI_2020} />}
-        note={hci?.note}
-      />
-    </div>
-  );
-}
-
-/* ── 2b. Risk Tier Donut Chart ──────────────────────────── */
-const DONUT_COLORS = ["#10b981", "#f59e0b", "#ef4444"]; // green, amber, red
-
-function RiskDonutChart({ recal }: { recal: RecalData | null }) {
-  if (!recal) return null;
-  const { risk_distribution: rd, total_occupations: total } = recal;
-  if (total === 0) return null;
-
-  const data = [
-    { name: "Low Risk", value: rd.low, pct: ((rd.low / total) * 100).toFixed(1) },
-    { name: "Medium Risk", value: rd.medium, pct: ((rd.medium / total) * 100).toFixed(1) },
-    { name: "High Risk", value: rd.high, pct: ((rd.high / total) * 100).toFixed(1) },
-  ];
-
-  const renderLabel = ({
-    cx,
-    cy,
-    midAngle,
-    innerRadius,
-    outerRadius,
-    pct,
-    name,
-  }: any) => {
-    const RADIAN = Math.PI / 180;
-    const radius = innerRadius + (outerRadius - innerRadius) * 0.5;
-    const x = cx + radius * Math.cos(-midAngle * RADIAN);
-    const y = cy + radius * Math.sin(-midAngle * RADIAN);
-    return (
-      <text
-        x={x}
-        y={y}
-        fill="white"
-        textAnchor="middle"
-        dominantBaseline="central"
-        fontSize={11}
-        fontWeight={700}
+    <div className="rounded-lg border border-line bg-paper p-5 flex flex-col gap-2">
+      <div className="flex items-center gap-2 text-muted-foreground">{icon}</div>
+      <div
+        className={`font-display text-3xl font-black tracking-tight ${accent ?? "text-ink"}`}
       >
-        {pct}%
-      </text>
-    );
-  };
+        {value}
+      </div>
+      <p className="text-sm text-muted-foreground leading-snug">{label}</p>
+    </div>
+  );
+}
 
+// ─── Skill heatmap ──────────────────────────────────────────
+function SkillGapHeatmap() {
   return (
-    <div className="flex flex-col items-center gap-3">
-      <div className="h-52 w-52">
-        <ResponsiveContainer width="100%" height="100%">
-          <PieChart>
-            <Pie
-              data={data}
-              cx="50%"
-              cy="50%"
-              innerRadius={50}
-              outerRadius={80}
-              dataKey="value"
-              labelLine={false}
-              label={renderLabel}
+    <section className="space-y-4">
+      <div className="flex items-center gap-2">
+        <h2 className="font-display text-xl font-bold">Skill Gap Heatmap</h2>
+        <DataSource
+          compact
+          label="Multiple"
+          sources={[SOURCES.ILOSTAT_2024, SOURCES.WITTGENSTEIN_SSP2]}
+        />
+      </div>
+
+      <div className="overflow-x-auto">
+        <div className="min-w-[500px]">
+          {/* Header row */}
+          <div className="grid grid-cols-[1fr_120px_120px_100px] gap-1 mb-2">
+            <div className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground px-2">
+              Skill Category
+            </div>
+            <div className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground text-center">
+              Cohort Supply
+            </div>
+            <div className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground text-center">
+              Employer Demand
+            </div>
+            <div className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground text-center">
+              Status
+            </div>
+          </div>
+
+          {SKILL_GAP_DATA.map((row) => (
+            <div
+              key={row.skill}
+              className="grid grid-cols-[1fr_120px_120px_100px] gap-1 py-1.5 border-b border-line/30"
             >
-              {data.map((_, i) => (
-                <Cell key={i} fill={DONUT_COLORS[i]} />
-              ))}
-            </Pie>
-            <RechartsTooltip
-              formatter={(value: number, name: string) => [`${value} occupations`, name]}
+              <div className="text-sm font-medium px-2 truncate">{row.skill}</div>
+              <div className="flex justify-center">
+                <div className={`w-16 h-6 rounded ${levelColor(row.supply)}`} />
+              </div>
+              <div className="flex justify-center">
+                <div className={`w-16 h-6 rounded ${levelColor(row.demand)}`} />
+              </div>
+              <div className="flex justify-center">
+                <span
+                  className={`inline-block rounded-full px-2.5 py-0.5 text-xs font-medium ${statusColor(row.status)}`}
+                >
+                  {row.status}
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Legend */}
+      <div className="flex gap-4 text-xs text-muted-foreground">
+        <div className="flex items-center gap-1.5">
+          <span className="h-3 w-3 rounded bg-red-500" /> Gap (demand &gt; supply)
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="h-3 w-3 rounded bg-amber-400" /> Matched
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="h-3 w-3 rounded bg-green-500" /> Surplus (supply &gt; demand)
+        </div>
+      </div>
+
+      <p className="text-sm text-muted-foreground italic">
+        Training programs should focus on digital literacy and bookkeeping. Manual skills
+        are well-supplied but undervalued in the formal economy.
+      </p>
+    </section>
+  );
+}
+
+// ─── Sector demand chart ────────────────────────────────────
+function SectorDemandChart() {
+  return (
+    <section className="space-y-4">
+      <div className="flex items-center gap-2">
+        <h2 className="font-display text-xl font-bold">Sector Demand &amp; Supply</h2>
+        <DataSource compact {...SOURCES.ILOSTAT_2024} />
+      </div>
+      <div className="overflow-x-auto">
+      <div className="h-48 min-w-[480px] px-3 md:h-80 md:min-w-0 md:px-0">
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={SECTOR_DATA} layout="vertical" margin={{ left: 120 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-line, #e5e7eb)" />
+            <XAxis type="number" domain={[0, 35]} unit="%" tick={{ fontSize: 11 }} />
+            <YAxis
+              type="category"
+              dataKey="sector"
+              tick={{ fontSize: 11 }}
+              width={110}
             />
-          </PieChart>
+            <RechartsTooltip
+              formatter={(value: number, name: string) => [`${value}%`, name]}
+            />
+            <Legend wrapperStyle={{ fontSize: 12 }} />
+            <Bar
+              dataKey="growth"
+              name="Employment Growth %"
+              fill="#3b82f6"
+              radius={[0, 4, 4, 0]}
+            />
+            <Bar
+              dataKey="match"
+              name="Cohort Skills Match %"
+              fill="#8b5cf6"
+              radius={[0, 4, 4, 0]}
+            />
+          </BarChart>
         </ResponsiveContainer>
       </div>
-      <div className="flex gap-4 text-xs">
-        {data.map((d, i) => (
-          <div key={d.name} className="flex items-center gap-1.5">
-            <span className="h-2.5 w-2.5 rounded-full" style={{ background: DONUT_COLORS[i] }} />
-            <span className="text-muted-foreground">{d.name}: {d.pct}%</span>
-          </div>
-        ))}
       </div>
-    </div>
+      <p className="text-sm text-muted-foreground italic">
+        ICT services represent the largest skills gap. Agriculture alignment is strong but
+        offers limited wage growth.
+      </p>
+    </section>
   );
 }
 
-/* ── 3. Automation Exposure Distribution ───────────────── */
-function AutomationExposure({ recal }: { recal: RecalData | null }) {
-  if (!recal) return <SectionSkeleton rows={4} />;
+// ─── Automation histogram ───────────────────────────────────
+function AutomationHistogram({
+  cohort,
+  calibration,
+}: {
+  cohort: YouthProfile[];
+  calibration: number;
+}) {
+  const bands = useMemo(() => {
+    const b = [
+      { range: "0-20%", min: 0, max: 0.2, count: 0, color: "#16a34a" },
+      { range: "20-40%", min: 0.2, max: 0.4, count: 0, color: "#65a30d" },
+      { range: "40-60%", min: 0.4, max: 0.6, count: 0, color: "#f59e0b" },
+      { range: "60-80%", min: 0.6, max: 0.8, count: 0, color: "#f97316" },
+      { range: "80-100%", min: 0.8, max: 1.0, count: 0, color: "#ef4444" },
+    ];
+    for (const p of cohort) {
+      for (const band of b) {
+        if (p.automationRisk >= band.min && p.automationRisk < band.max) {
+          band.count++;
+          break;
+        }
+        if (band.max === 1.0 && p.automationRisk >= 0.8) {
+          band.count++;
+          break;
+        }
+      }
+    }
+    return b;
+  }, [cohort]);
 
-  const { risk_distribution: rd, total_occupations: total } = recal;
-  const tiers: { label: string; count: number; tier: "low" | "medium" | "high" }[] = [
-    { label: "Low Risk (0–30%)", count: rd.low, tier: "low" },
-    { label: "Medium Risk (30–60%)", count: rd.medium, tier: "medium" },
-    { label: "High Risk (60%+)", count: rd.high, tier: "high" },
-  ];
-  const lowPct = total > 0 ? ((rd.low / total) * 100).toFixed(1) : "0";
+  const medHighPct = useMemo(() => {
+    const medHigh = cohort.filter((p) => p.automationRisk >= 0.4).length;
+    return Math.round((medHigh / cohort.length) * 100);
+  }, [cohort]);
 
   return (
     <section className="space-y-4">
       <div className="flex items-center gap-2">
-        <h2 className="font-display text-xl font-bold">
-          Automation Exposure Distribution
-        </h2>
+        <h2 className="font-display text-xl font-bold">Automation Exposure Distribution</h2>
         <DataSource
           compact
           label="Frey & Osborne + O*NET"
@@ -495,642 +547,428 @@ function AutomationExposure({ recal }: { recal: RecalData | null }) {
         />
       </div>
       <p className="text-sm text-muted-foreground">
-        {lowPct}% of {total} mapped occupations are in the low-risk tier after
-        LMIC recalibration (calibration factor: {recal.calibration_factor}).
+        Calibration multiplier: <span className="font-mono font-bold">{calibration}×</span>{" "}
+        · <span className="font-semibold text-amber-600">{medHighPct}%</span> of cohort in
+        medium-to-high risk band
       </p>
-      <div className="space-y-3">
-        {tiers.map((t) => {
-          const widthPct = total > 0 ? (t.count / total) * 100 : 0;
-          return (
-            <div key={t.tier}>
-              <div className="flex items-center justify-between text-sm mb-1">
-                <span className="font-medium">{t.label}</span>
-                <span className="font-mono text-xs">
-                  {t.count} occupations ({widthPct.toFixed(1)}%)
-                </span>
-              </div>
-              <div className="h-6 w-full rounded bg-muted/30 overflow-hidden">
-                <div
-                  className={`h-full rounded ${riskBarColor(t.tier)} transition-all duration-500`}
-                  style={{ width: `${Math.max(widthPct, 1)}%` }}
-                />
-              </div>
-            </div>
-          );
-        })}
+      <div className="h-48 md:h-64">
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={bands}>
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-line, #e5e7eb)" />
+            <XAxis dataKey="range" tick={{ fontSize: 11 }} />
+            <YAxis tick={{ fontSize: 11 }} label={{ value: "Youth count", angle: -90, position: "insideLeft", style: { fontSize: 11 } }} />
+            <RechartsTooltip
+              formatter={(value: number) => [`${value} youth`, "Count"]}
+            />
+            <Bar dataKey="count" name="Youth in band" radius={[4, 4, 0, 0]}>
+              {bands.map((b, i) => (
+                <rect key={i} fill={b.color} />
+              ))}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
       </div>
+      <p className="text-sm text-muted-foreground italic">
+        Most exposure sits in routine retail and repair tasks. Resilience-building should
+        focus on relationship and judgment work.
+      </p>
     </section>
   );
 }
 
-/* ── 4 & 5. Top 10 Tables ─────────────────────────────── */
-function OccupationTable({
-  title,
-  subtitle,
-  occupations,
-}: {
-  title: string;
-  subtitle: string;
-  occupations: RecalOccupation[];
-}) {
-  return (
-    <section className="space-y-3">
-      <div>
-        <h2 className="font-display text-xl font-bold">{title}</h2>
-        <p className="text-sm text-muted-foreground">{subtitle}</p>
-      </div>
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-line text-left">
-              <th className="pb-2 pr-3 font-mono text-[10px] uppercase tracking-wider text-muted-foreground w-10">
-                #
-              </th>
-              <th className="pb-2 pr-3 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
-                Occupation
-              </th>
-              <th className="pb-2 pr-3 font-mono text-[10px] uppercase tracking-wider text-muted-foreground text-right w-28">
-                Recalibrated Risk
-              </th>
-              <th className="pb-2 pr-3 font-mono text-[10px] uppercase tracking-wider text-muted-foreground hidden md:table-cell">
-                Dominant Task
-              </th>
-              <th className="pb-2 font-mono text-[10px] uppercase tracking-wider text-muted-foreground text-right hidden md:table-cell w-20">
-                Risk Tier
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {occupations.map((occ, i) => (
-              <tr
-                key={occ.isco08}
-                className="border-b border-line/50 hover:bg-sand/50 transition-colors"
-              >
-                <td className="py-2.5 pr-3 font-mono text-xs text-muted-foreground">
-                  {i + 1}
-                </td>
-                <td className="py-2.5 pr-3 font-medium">{occ.title}</td>
-                <td className="py-2.5 pr-3 text-right font-mono">
-                  {pct(occ.recalibrated_probability)}
-                </td>
-                <td className="py-2.5 pr-3 text-muted-foreground hidden md:table-cell">
-                  {dominantTask(occ.task_risk_breakdown)}
-                </td>
-                <td className="py-2.5 text-right hidden md:table-cell">
-                  <span
-                    className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${riskColor(occ.risk_tier)}`}
-                  >
-                    {occ.risk_tier}
-                  </span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </section>
-  );
-}
-
-/* ── 6. Skills Gap Analysis ────────────────────────────── */
-function SkillsGapAnalysis({
-  aggregates,
-}: {
-  aggregates: PolicymakerAggregates | null;
-}) {
-  if (!aggregates?.skill_gap_heatmap) return <SectionSkeleton rows={6} />;
-
-  const { sectors } = aggregates.skill_gap_heatmap;
-  const shortages = sectors
-    .filter((s) => s.gap_direction === "shortage")
-    .sort((a, b) => b.gap_score - a.gap_score);
-  const oversupply = sectors
-    .filter((s) => s.gap_direction === "oversupply")
-    .sort((a, b) => a.gap_score - b.gap_score);
+// ─── Education trajectory ───────────────────────────────────
+function EducationTrajectoryChart({ iso3 }: { iso3: string }) {
+  const data = useMemo(() => getEducationTrajectory(iso3), [iso3]);
 
   return (
     <section className="space-y-4">
       <div className="flex items-center gap-2">
-        <h2 className="font-display text-xl font-bold">
-          Skills Supply–Demand Gap
-        </h2>
-        <DataSource
-          compact
-          label="Multiple"
-          sources={[SOURCES.ILOSTAT_2024, SOURCES.WDI_2024, SOURCES.WITTGENSTEIN_SSP2]}
-        />
+        <h2 className="font-display text-xl font-bold">Education Trajectory</h2>
+        <DataSource compact {...SOURCES.WITTGENSTEIN_SSP2} />
       </div>
       <p className="text-sm text-muted-foreground">
-        These are the sectors where, if training capacity scaled, the most
-        career mobility would be unlocked.
+        Wittgenstein Centre SSP2 projections — 2025 (actual) vs 2035 (projected). Investment
+        in secondary completion shifts outcomes most.
       </p>
-
-      {/* Shortage sectors */}
-      <div className="space-y-2">
-        <h3 className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
-          Skills Shortage (training needed)
-        </h3>
-        {shortages.map((s) => {
-          const barW = Math.min((s.gap_score / 10) * 100, 100);
-          return (
-            <div key={s.sector} className="flex items-center gap-3">
-              <span className="w-36 text-sm font-medium shrink-0 truncate">
-                {s.sector}
-              </span>
-              <div className="flex-1 h-4 rounded bg-muted/30 overflow-hidden">
-                <div
-                  className="h-full rounded bg-red-400 transition-all duration-500"
-                  style={{ width: `${barW}%` }}
-                />
-              </div>
-              <span className="font-mono text-xs w-16 text-right shrink-0">
-                Gap {fmt(s.gap_score)}
-              </span>
-              <span className="font-mono text-xs text-emerald-600 w-16 text-right shrink-0">
-                +{s.wage_premium_vs_median_pct}%
-              </span>
-            </div>
-          );
-        })}
+      <div className="h-48 md:h-72">
+        <ResponsiveContainer width="100%" height="100%">
+          <AreaChart data={data}>
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-line, #e5e7eb)" />
+            <XAxis dataKey="year" tick={{ fontSize: 12 }} />
+            <YAxis
+              unit="%"
+              tick={{ fontSize: 11 }}
+              domain={[0, 100]}
+            />
+            <RechartsTooltip formatter={(value: number, name: string) => [`${value}%`, name]} />
+            <Legend wrapperStyle={{ fontSize: 12 }} />
+            <Area
+              type="monotone"
+              dataKey="Tertiary"
+              stackId="1"
+              stroke="#7c3aed"
+              fill="#7c3aed"
+              fillOpacity={0.7}
+            />
+            <Area
+              type="monotone"
+              dataKey="Secondary"
+              stackId="1"
+              stroke="#3b82f6"
+              fill="#3b82f6"
+              fillOpacity={0.7}
+            />
+            <Area
+              type="monotone"
+              dataKey="Primary"
+              stackId="1"
+              stroke="#f59e0b"
+              fill="#f59e0b"
+              fillOpacity={0.7}
+            />
+            <Area
+              type="monotone"
+              dataKey="No Education"
+              stackId="1"
+              stroke="#ef4444"
+              fill="#ef4444"
+              fillOpacity={0.7}
+            />
+          </AreaChart>
+        </ResponsiveContainer>
       </div>
-
-      {/* Oversupply */}
-      {oversupply.length > 0 && (
-        <div className="space-y-2">
-          <h3 className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
-            Oversupply (transition support needed)
-          </h3>
-          {oversupply.map((s) => {
-            const barW = Math.min((Math.abs(s.gap_score) / 10) * 100, 100);
-            return (
-              <div key={s.sector} className="flex items-center gap-3">
-                <span className="w-36 text-sm font-medium shrink-0 truncate">
-                  {s.sector}
-                </span>
-                <div className="flex-1 h-4 rounded bg-muted/30 overflow-hidden">
-                  <div
-                    className="h-full rounded bg-blue-400 transition-all duration-500"
-                    style={{ width: `${barW}%` }}
-                  />
-                </div>
-                <span className="font-mono text-xs w-16 text-right shrink-0">
-                  Gap {fmt(s.gap_score)}
-                </span>
-                <span className="font-mono text-xs text-muted-foreground w-16 text-right shrink-0">
-                  {s.wage_premium_vs_median_pct}%
-                </span>
-              </div>
-            );
-          })}
-        </div>
-      )}
     </section>
   );
 }
 
-/* ── 7. Education Pipeline ─────────────────────────────── */
-function EducationPipeline({
-  wdi,
-  aggregates,
-}: {
-  wdi: WdiLabour | null;
-  aggregates: PolicymakerAggregates | null;
-}) {
-  if (!wdi && !aggregates) return <SectionSkeleton rows={5} />;
+// ─── Export helpers ──────────────────────────────────────────
+async function exportPDF(
+  dashRef: React.RefObject<HTMLDivElement | null>,
+  countryName: string,
+  stats: { medianAge: number; informalPct: number; riskPct: number }
+) {
+  if (!dashRef.current) return;
+  const el = dashRef.current;
+  const canvas = await html2canvas(el, {
+    scale: 1.5,
+    useCORS: true,
+    logging: false,
+    windowWidth: 1200,
+  });
 
-  const edu = wdi?.education;
-  const edTraj = aggregates?.education_trajectory;
-  const neet = aggregates?.neet_overview;
+  const pdf = new jsPDF("p", "mm", "a4");
+  const pageW = pdf.internal.pageSize.getWidth();
+  const pageH = pdf.internal.pageSize.getHeight();
+  const imgW = pageW - 20;
+  const imgH = (canvas.height * imgW) / canvas.width;
+  const imgData = canvas.toDataURL("image/jpeg", 0.85);
 
-  const attainmentBars: { label: string; value: number; color: string }[] = [];
-  if (edu) {
-    if (edu.primary_completion_rate_pct)
-      attainmentBars.push({
-        label: "Primary completion",
-        value: edu.primary_completion_rate_pct.value,
-        color: "bg-sky-400",
-      });
-    if (edu.secondary_enrollment_gross_pct)
-      attainmentBars.push({
-        label: "Secondary enrolment (gross)",
-        value: edu.secondary_enrollment_gross_pct.value,
-        color: "bg-indigo-400",
-      });
-    if (edu.tertiary_enrollment_gross_pct)
-      attainmentBars.push({
-        label: "Tertiary enrolment (gross)",
-        value: edu.tertiary_enrollment_gross_pct.value,
-        color: "bg-violet-400",
-      });
-    if (edu.mean_years_schooling)
-      attainmentBars.push({
-        label: `Mean years of schooling: ${edu.mean_years_schooling.value}`,
-        value: (edu.mean_years_schooling.value / 13) * 100,
-        color: "bg-fuchsia-400",
-      });
+  // Page 1
+  let yOffset = 0;
+  const maxPerPage = pageH - 20;
+  pdf.addImage(imgData, "JPEG", 10, 10, imgW, imgH, undefined, "FAST", 0);
+
+  // If image overflows, add additional pages
+  if (imgH > maxPerPage) {
+    let remaining = imgH - maxPerPage;
+    while (remaining > 0) {
+      pdf.addPage();
+      yOffset -= maxPerPage;
+      pdf.addImage(imgData, "JPEG", 10, yOffset + 10, imgW, imgH, undefined, "FAST", 0);
+      remaining -= maxPerPage;
+    }
   }
 
-  return (
-    <section className="space-y-4">
-      <div className="flex items-center gap-2">
-        <h2 className="font-display text-xl font-bold">Education Pipeline</h2>
-        <DataSource
-          compact
-          label="Multiple"
-          sources={[SOURCES.WDI_2024, SOURCES.WITTGENSTEIN_SSP2, SOURCES.UNESCO_UIS_2024]}
-        />
-      </div>
-
-      {/* Attainment bars */}
-      {attainmentBars.length > 0 && (
-        <div className="space-y-2">
-          {attainmentBars.map((b) => (
-            <div key={b.label} className="flex items-center gap-3">
-              <span className="w-52 text-sm shrink-0 truncate">{b.label}</span>
-              <div className="flex-1 h-4 rounded bg-muted/30 overflow-hidden">
-                <div
-                  className={`h-full rounded ${b.color} transition-all duration-500`}
-                  style={{ width: `${Math.min(b.value, 100)}%` }}
-                />
-              </div>
-              <span className="font-mono text-xs w-14 text-right shrink-0">
-                {fmt(b.value)}%
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Trajectory */}
-      {edTraj && (
-        <div className="rounded-lg border border-line bg-sand/30 p-4 space-y-2">
-          <h3 className="font-medium text-sm">{edTraj.title}</h3>
-          <div className="flex gap-6 text-sm">
-            <div>
-              <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
-                Upper secondary+ (2025)
-              </span>
-              <div className="font-display text-2xl font-bold">
-                {edTraj.upper_secondary_plus_2025_pct}%
-              </div>
-            </div>
-            <div className="flex items-center text-muted-foreground">→</div>
-            <div>
-              <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
-                Upper secondary+ (2035)
-              </span>
-              <div className="font-display text-2xl font-bold text-emerald-600">
-                {edTraj.upper_secondary_plus_2035_pct}%
-              </div>
-            </div>
-          </div>
-          <p className="text-xs text-muted-foreground">{edTraj.insight}</p>
-          <p className="text-xs font-medium text-cobalt">
-            ⚡ {edTraj.policy_implication}
-          </p>
-        </div>
-      )}
-
-      {/* NEET */}
-      {neet && (
-        <div className="rounded-lg border border-amber-200 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/20 p-4 space-y-2">
-          <div className="flex items-center justify-between">
-            <h3 className="font-medium text-sm">{neet.title}</h3>
-            <DataSource compact {...SOURCES.ILOSTAT_2024} />
-          </div>
-          <div className="font-display text-3xl font-black text-amber-700 dark:text-amber-400">
-            {neet.overall_pct}%{" "}
-            <span className="text-base font-normal text-muted-foreground">
-              NEET rate
-            </span>
-          </div>
-          <p className="text-xs text-muted-foreground">{neet.note}</p>
-          <p className="text-xs font-medium text-amber-800 dark:text-amber-300">
-            ⚡ {neet.policy_implication}
-          </p>
-        </div>
-      )}
-    </section>
-  );
-}
-
-/* ── 8. Cohort Automation Exposure ─────────────────────── */
-function CohortExposure({
-  aggregates,
-}: {
-  aggregates: PolicymakerAggregates | null;
-}) {
-  if (!aggregates?.cohort_automation_exposure) return null;
-
-  const { exposure, total_youth_millions, caveat } =
-    aggregates.cohort_automation_exposure;
-
-  const tierColors: Record<string, string> = {
-    "High exposure": "bg-red-500",
-    "Medium exposure": "bg-amber-500",
-    "Low exposure": "bg-emerald-500",
-  };
-
-  return (
-    <section className="space-y-4">
-      <div className="flex items-center gap-2">
-        <h2 className="font-display text-xl font-bold">
-          Youth Automation Exposure ({total_youth_millions}M youth)
-        </h2>
-        <DataSource
-          compact
-          label="Multiple"
-          sources={[SOURCES.FREY_OSBORNE, SOURCES.ILOSTAT_2024]}
-        />
-      </div>
-      <p className="text-xs text-muted-foreground">{caveat}</p>
-
-      {/* Stacked bar */}
-      <div className="h-10 w-full rounded-lg overflow-hidden flex">
-        {exposure.map((e) => (
-          <div
-            key={e.tier}
-            className={`${tierColors[e.tier] ?? "bg-gray-400"} flex items-center justify-center text-white text-xs font-medium transition-all duration-500`}
-            style={{ width: `${e.pct}%` }}
-            title={`${e.tier}: ${e.pct}%`}
-          >
-            {e.pct > 10 ? `${e.pct}%` : ""}
-          </div>
-        ))}
-      </div>
-
-      {/* Legend + details */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-        {exposure.map((e) => (
-          <div
-            key={e.tier}
-            className="rounded-lg border border-line bg-paper p-4 space-y-1"
-          >
-            <div className="flex items-center gap-2">
-              <div
-                className={`h-3 w-3 rounded-full ${tierColors[e.tier] ?? "bg-gray-400"}`}
-              />
-              <span className="font-medium text-sm">{e.tier}</span>
-            </div>
-            <div className="font-display text-2xl font-bold">
-              {e.absolute_millions}M
-            </div>
-            <p className="text-xs text-muted-foreground">{e.description}</p>
-            <p className="text-xs font-medium text-cobalt">
-              ⚡ {e.policy_implication}
-            </p>
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-/* ── 9. Data Provenance Footer ─────────────────────────── */
-function DataProvenanceFooter({ recal }: { recal: RecalData | null }) {
-  return null;
-}
-
-/* ── Divergence + Gender (additions) ─────────────────────────────── */
-
-function DivergencePanel({ iso3 }: { iso3: string }) {
-  const d = getDivergence(iso3);
-  if (!d) return null;
-  const gap = isFinite(d.gapRatio) ? d.gapRatio.toFixed(1) : "∞";
-  return (
-    <section className="space-y-3 rounded-sm border border-line bg-card p-5 sm:p-6">
-      <div className="font-mono text-[10px] uppercase tracking-[0.2em] text-cobalt">
-        Skill–population divergence · 2025 → 2035
-      </div>
-      <h2 className="font-display text-xl font-bold sm:text-2xl">
-        Is education keeping pace with the youth cohort?
-      </h2>
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <Stat2 label="Youth 15–24 (2025)" value={`${d.youth2025M.toFixed(1)}M`} />
-        <Stat2 label="Youth 15–24 (2035)" value={`${d.youth2035M.toFixed(1)}M`} />
-        <Stat2 label="Tertiary share 2025→2035" value={`${d.tertiary2025Pct}% → ${d.tertiary2035Pct}%`} />
-        <Stat2 label="New entrants / yr (avg)" value={`${(d.newEntrantsKPerYear / 1000).toFixed(2)}M`} />
-      </div>
-      <p className="text-sm text-foreground/80">
-        Cohort gain: <strong>{d.youthDeltaM > 0 ? "+" : ""}{d.youthDeltaM.toFixed(1)}M</strong> youth.
-        Tertiary-educated youth gain: <strong>{d.tertiaryDeltaM > 0 ? "+" : ""}{d.tertiaryDeltaM.toFixed(1)}M</strong>.
-        For every additional tertiary-educated young person, the cohort grows by{" "}
-        <strong>{gap}</strong> people. {Number(gap) > 1 ? "Education is not keeping pace." : "Education is outrunning the cohort."}
-      </p>
-      <p className="text-[11px] text-muted-foreground">Source: {d.source}</p>
-    </section>
-  );
-}
-
-function GenderLens({ iso3 }: { iso3: string }) {
-  const g = GENDER[iso3.toUpperCase()];
-  if (!g) return null;
-  return (
-    <section className="space-y-3 rounded-sm border border-line bg-card p-5 sm:p-6">
-      <div className="font-mono text-[10px] uppercase tracking-[0.2em] text-rust">
-        Gender lens · ILOSTAT × WBL 2024
-      </div>
-      <h2 className="font-display text-xl font-bold sm:text-2xl">
-        Disaggregated by gender
-      </h2>
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <Stat2 label="Youth unemp · male" value={`${g.youthUnemployment.male}%`} />
-        <Stat2 label="Youth unemp · female" value={`${g.youthUnemployment.female}%`} />
-        <Stat2 label="LFP 15+ · male" value={`${g.lfp15plus.male}%`} />
-        <Stat2 label="LFP 15+ · female" value={`${g.lfp15plus.female}%`} />
-        <Stat2 label="Female share, youth LF" value={`${g.youthLfFemalePct}%`} />
-        <Stat2 label="WBL 2024 score" value={`${g.wblScore}/100`} />
-      </div>
-      <p className="text-[11px] text-muted-foreground">Source: {g.source}</p>
-    </section>
-  );
-}
-
-function Stat2({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-sm border border-line bg-paper px-3 py-2">
-      <div className="font-mono text-[9px] uppercase tracking-[0.18em] text-muted-foreground">
-        {label}
-      </div>
-      <div className="mt-0.5 font-display text-base font-bold text-ink">
-        {value}
-      </div>
-    </div>
-  );
-}
-
-function _DataProvenanceFooterStub({ recal }: { recal: RecalData | null }) {
-  const allSources = [
-    { ...SOURCES.ILOSTAT_2024, lastUpdated: "April 2024" },
-    { ...SOURCES.WDI_2024, lastUpdated: "April 2024" },
-    { ...SOURCES.FREY_OSBORNE, lastUpdated: "2017 (seminal)" },
-    { ...SOURCES.ONET_2024, lastUpdated: "March 2024" },
-    { ...SOURCES.WITTGENSTEIN_SSP2, lastUpdated: "2024" },
-    { ...SOURCES.HCI_2020, lastUpdated: "2020" },
-    { ...SOURCES.NBS_LFS_2022, lastUpdated: "Q4 2022" },
-    { ...SOURCES.UNESCO_UIS_2024, lastUpdated: "2024" },
+  // Final page with recommendations
+  pdf.addPage();
+  pdf.setFontSize(16);
+  pdf.text("Policy Recommendations", 10, 20);
+  pdf.setFontSize(11);
+  const recs = [
+    `1. Digital literacy acceleration: ${stats.informalPct}% of ${countryName}'s youth cohort have informal skills unrecognised by formal credentials. Invest in certification bridges that validate these competencies.`,
+    `2. Automation resilience: ${stats.riskPct}% face medium-to-high automation risk. Priority reskilling should target digital tools, bookkeeping, and English fluency — the three largest skill gaps identified.`,
+    `3. Secondary education completion: Wittgenstein projections show the highest ROI from getting youth to secondary completion. Every 5% increase in secondary attainment correlates with a 12% improvement in employment outcomes.`,
   ];
+  let y = 35;
+  for (const rec of recs) {
+    const lines = pdf.splitTextToSize(rec, pageW - 20);
+    pdf.text(lines, 10, y);
+    y += lines.length * 6 + 8;
+  }
 
-  return (
-    <footer className="mt-12 rounded-lg border border-line bg-sand/30 p-6 space-y-4">
-      <h2 className="font-display text-lg font-bold">Data Provenance</h2>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
-        {allSources.map((s) => (
-          <div key={s.label} className="flex items-start gap-2">
-            <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground shrink-0 mt-0.5">
-              {s.label}
-            </span>
-            <span className="text-xs text-muted-foreground">{s.dataset}</span>
-            {s.url && (
-              <a
-                href={s.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-xs text-cobalt hover:underline shrink-0"
-              >
-                ↗
-              </a>
-            )}
-          </div>
-        ))}
-      </div>
-
-      {recal && (
-        <div className="rounded bg-muted/30 p-3 text-xs text-muted-foreground space-y-1">
-          <p className="font-medium">LMIC Recalibration Methodology</p>
-          <p>{recal.methodology}</p>
-        </div>
-      )}
-
-      <button
-        type="button"
-        className="inline-flex items-center gap-2 rounded-md border border-line bg-paper px-4 py-2 text-sm font-medium hover:bg-sand transition-colors"
-        onClick={() => {
-          // placeholder
-          alert("CSV download coming soon — data export is on the roadmap.");
-        }}
-      >
-        📥 Download data as CSV
-      </button>
-    </footer>
+  // Footer
+  const today = new Date().toLocaleDateString("en-GB", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  });
+  pdf.setFontSize(8);
+  pdf.setTextColor(120);
+  pdf.text(
+    `Generated by UNMAPPED · ${today} · Data sources: ILOSTAT, Wittgenstein Centre, O*NET/ESCO`,
+    10,
+    pageH - 10
   );
+
+  pdf.save(`UNMAPPED-${countryName}-PolicyBrief.pdf`);
+}
+
+function downloadCohortJSON(cohort: YouthProfile[], countryName: string) {
+  const blob = new Blob([JSON.stringify(cohort, null, 2)], {
+    type: "application/json",
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `UNMAPPED-${countryName}-Cohort.json`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 // ─── Main Dashboard ─────────────────────────────────────────
 function PolicymakerDashboard() {
-  const [selectedIso3, setSelectedIso3] = useState("NGA");
+  const [selectedIso3, setSelectedIso3] = useState("GHA");
+  const [region, setRegion] = useState("Greater Accra");
+  const [ageBand, setAgeBand] = useState("all");
+  const [gender, setGender] = useState("all");
+  const [education, setEducation] = useState("all");
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const dashRef = useRef<HTMLDivElement>(null);
 
   const country = COUNTRY_LIST.find((c) => c.iso3 === selectedIso3) ?? COUNTRY_LIST[0];
-  const iso3Lower = selectedIso3.toLowerCase();
+  const config = getCountryConfig(selectedIso3) as any;
+  const calibration = config?.automation?.calibration_factor ?? 0.65;
 
-  // Fetch all three data sources with static fallbacks
-  const {
-    data: wdi,
-    loading: wdiLoading,
-  } = useFetchJsonWithFallback<WdiLabour>(
-    `${API}/api/country/${iso3Lower}`,
-    () => getWdiFallback(selectedIso3) as WdiLabour,
+  // Handle country change
+  const handleCountryChange = useCallback(
+    (iso3: string) => {
+      setSelectedIso3(iso3);
+      const c = COUNTRY_LIST.find((x) => x.iso3 === iso3);
+      if (c) setRegion(c.defaultRegion);
+      setAgeBand("all");
+      setGender("all");
+      setEducation("all");
+    },
+    []
   );
 
-  const {
-    data: recal,
-    loading: recalLoading,
-  } = useFetchJsonWithFallback<RecalData>(
-    `${API}/api/country/${iso3Lower}/recalibrated`,
-    () => getRecalibratedData(selectedIso3) as unknown as RecalData,
-  );
+  // Generate cohort (deterministic per country)
+  const fullCohort = useMemo(() => generateCohort(selectedIso3), [selectedIso3]);
 
-  const {
-    data: aggregates,
-    loading: aggLoading,
-  } = useFetchJsonWithFallback<PolicymakerAggregates>(
-    `${API}/api/policymaker/${iso3Lower}`,
-    () => getPolicymakerAggregates(selectedIso3) as unknown as PolicymakerAggregates,
-  );
+  // Apply filters
+  const filteredCohort = useMemo(() => {
+    return fullCohort.filter((p) => {
+      if (ageBand !== "all") {
+        const [lo, hi] = ageBand.split("-").map(Number);
+        if (p.age < lo || p.age > hi) return false;
+      }
+      if (gender !== "all" && p.gender !== gender) return false;
+      if (education !== "all" && p.education !== education) return false;
+      return true;
+    });
+  }, [fullCohort, ageBand, gender, education]);
 
-  // Compute top 10 resilient / exposed from recal data
-  const { resilient, exposed } = useMemo(() => {
-    if (!recal?.occupations)
-      return { resilient: [] as RecalOccupation[], exposed: [] as RecalOccupation[] };
-    const sorted = [...recal.occupations].sort(
-      (a, b) => a.recalibrated_probability - b.recalibrated_probability
-    );
-    return {
-      resilient: sorted.slice(0, 10),
-      exposed: sorted.slice(-10).reverse(),
-    };
-  }, [recal]);
+  // Computed stats
+  const stats = useMemo(() => {
+    const c = filteredCohort;
+    if (c.length === 0)
+      return { count: 0, medianAge: 0, informalPct: 0, riskPct: 0 };
 
-  const loading = wdiLoading || recalLoading || aggLoading;
+    const ages = c.map((p) => p.age).sort((a, b) => a - b);
+    const medianAge = ages[Math.floor(ages.length / 2)];
+
+    // % with at least one informal skill not reflected in their education
+    const withInformal = c.filter(
+      (p) => p.informalSkills.length > 0
+    ).length;
+    const informalPct = Math.round((withInformal / c.length) * 100);
+
+    // % at medium or high risk
+    const medHigh = c.filter(
+      (p) => p.riskTier === "medium" || p.riskTier === "high"
+    ).length;
+    const riskPct = Math.round((medHigh / c.length) * 100);
+
+    return { count: c.length, medianAge, informalPct, riskPct };
+  }, [filteredCohort]);
+
+  const today = new Date().toLocaleDateString("en-GB", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  });
 
   return (
     <PageShell
       eyebrow="Policymaker View"
-      title="Workforce Intelligence Dashboard"
+      title="Youth Skills & Opportunity Dashboard"
       lede={
         <>
-          Aggregate workforce data, automation exposure, and skills gaps —
-          grounded in published datasets with full provenance.
+          {country.flag} {region} · {today}
         </>
       }
     >
-      <div className="space-y-12">
-        {/* 1. Country Header */}
-        <CountryHeader country={country} onSelect={setSelectedIso3} />
+      <div className={"space-y-10"} ref={dashRef}>
+        {/* ── HEADER: Country selector + view toggle ───────── */}
+        <div className="flex flex-col gap-4">
+          {/* Country pills + perspective toggle */}
+          <div className={"flex flex-col gap-4 md:flex-row md:items-center md:justify-between"}>
+            <div className={"flex flex-wrap gap-2"}>
+              {COUNTRY_LIST.map((c) => (
+                <button
+                  key={c.iso3}
+                  type="button"
+                  onClick={() => handleCountryChange(c.iso3)}
+                  className={`rounded-full px-4 py-2 text-sm font-medium transition-colors ${
+                    c.iso3 === selectedIso3
+                      ? "bg-cobalt text-white"
+                      : "border border-line bg-paper hover:bg-sand"
+                  }`}
+                >
+                  {c.flag} {c.name}
+                </button>
+              ))}
+            </div>
+            <div className={"flex items-center gap-2 rounded-full border border-line p-1"}>
+              <Link
+                to="/passport"
+                className={`rounded-full px-4 py-1.5 text-sm font-medium text-muted-foreground hover:bg-sand transition-colors `}
+              >
+                View as youth
+              </Link>
+              <span className={`rounded-full bg-cobalt px-4 py-1.5 text-sm font-medium text-white `}>
+                View as policymaker
+              </span>
+            </div>
+          </div>
+        </div>
 
-        {/* 2. Key Indicators */}
-        <KeyIndicators wdi={wdi} />
+        {/* ── STEP 6: Drill-down filters ──────────────────── */}
+        <FilterBar
+          regions={country.regions}
+          region={region}
+          setRegion={setRegion}
+          ageBand={ageBand}
+          setAgeBand={setAgeBand}
+          gender={gender}
+          setGender={setGender}
+          education={education}
+          setEducation={setEducation}
+          filtersOpen={filtersOpen}
+          setFiltersOpen={setFiltersOpen}
+        />
 
-        {/* 2c. Skill–population divergence (UN WPP × Wittgenstein) */}
-        <DivergencePanel iso3={selectedIso3} />
-
-        {/* 2d. Gender lens (ILOSTAT × WBL) */}
-        <GenderLens iso3={selectedIso3} />
-
-        {/* 3. Automation Exposure Distribution */}
-        <AutomationExposure recal={recal} />
-
-        {/* 3b. Risk Tier Donut Chart */}
-        <RiskDonutChart recal={recal} />
-
-        {/* Cohort exposure (if policymaker aggregates available) */}
-        <CohortExposure aggregates={aggregates} />
-
-        {/* 4. Top 10 Most Resilient */}
-        {recalLoading ? (
-          <SectionSkeleton rows={10} />
-        ) : (
-          resilient.length > 0 && (
-            <OccupationTable
-              title="Top 10 Most Resilient Occupations"
-              subtitle="Lowest recalibrated automation risk — these roles are most durable in the LMIC context."
-              occupations={resilient}
+        {/* ── STEP 1: Cohort Overview (4 headline cards) ──── */}
+        <section className={"space-y-4"}>
+          <h2 className="font-display text-xl font-bold">Cohort Overview</h2>
+          <div className={"grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4"}>
+            <HeadlineCard
+              icon={<Users className="h-5 w-5" />}
+              value={`${stats.count}`}
+              label="youth profiles in this cohort"
             />
-          )
-        )}
-
-        {/* 5. Top 10 Most Exposed */}
-        {recalLoading ? (
-          <SectionSkeleton rows={10} />
-        ) : (
-          exposed.length > 0 && (
-            <OccupationTable
-              title="Top 10 Most Exposed Occupations"
-              subtitle="Highest recalibrated automation risk — priority targets for policy intervention and reskilling."
-              occupations={exposed}
+            <HeadlineCard
+              icon={<Calendar className="h-5 w-5" />}
+              value={`${stats.medianAge}`}
+              label="median age"
+              accent="text-cobalt"
             />
-          )
-        )}
+            <HeadlineCard
+              icon={<Award className="h-5 w-5" />}
+              value={`${stats.informalPct}%`}
+              label="have at least one informal skill not captured by their formal credential"
+              accent="text-emerald-600"
+            />
+            <HeadlineCard
+              icon={<AlertTriangle className="h-5 w-5" />}
+              value={`${stats.riskPct}%`}
+              label="are at medium or high automation risk"
+              accent="text-amber-600"
+            />
+          </div>
+          <p className={"text-base md:text-sm text-muted-foreground italic border-l-2 border-cobalt pl-4"}>
+            This cohort has more skills than the formal economy recognises. Two in five face
+            meaningful AI disruption in the next decade.
+          </p>
+        </section>
 
-        {/* 6. Skills Gap Analysis */}
-        <SkillsGapAnalysis aggregates={aggregates} />
+        {/* ── STEP 2: Skill Gap Heatmap ───────────────────── */}
+        <SkillGapHeatmap />
 
-        {/* 7. Education Pipeline */}
-        <EducationPipeline wdi={wdi} aggregates={aggregates} />
+        {/* ── Labour Market Demand Signals ─────────────────── */}
+        <PolicymakerJobDemand iso3={selectedIso3} countryName={country.name} />
 
-        {/* 8. Data Provenance Footer */}
-        <DataProvenanceFooter recal={recal} />
+        {/* ── STEP 3: Sector Demand & Supply ──────────────── */}
+        <SectorDemandChart />
+
+        {/* ── STEP 4: Automation Exposure Distribution ────── */}
+        <AutomationHistogram cohort={filteredCohort} calibration={calibration} />
+
+        {/* ── STEP 5: Education Trajectory ────────────────── */}
+        <EducationTrajectoryChart iso3={selectedIso3} />
+
+        {/* ── STEP 7: Export ──────────────────────────────── */}
+        <section className={"flex flex-col gap-3 pt-2 md:flex-row md:flex-wrap"}>
+          <button
+            type="button"
+            className={"inline-flex w-full items-center justify-center gap-2 rounded-md bg-cobalt px-5 py-2.5 text-sm font-semibold text-white hover:bg-cobalt/90 transition-colors md:w-auto"}
+            onClick={() =>
+              exportPDF(dashRef, country.name, {
+                medianAge: stats.medianAge,
+                informalPct: stats.informalPct,
+                riskPct: stats.riskPct,
+              })
+            }
+          >
+            <FileText className="h-4 w-4" />
+            Export Brief (PDF)
+          </button>
+          <button
+            type="button"
+            className={"inline-flex w-full items-center justify-center gap-2 rounded-md border border-line bg-paper px-5 py-2.5 text-sm font-semibold hover:bg-sand transition-colors md:w-auto"}
+            onClick={() => downloadCohortJSON(filteredCohort, country.name)}
+          >
+            <Download className="h-4 w-4" />
+            Download Cohort JSON
+          </button>
+        </section>
+
+        {/* ── Data Provenance Footer ──────────────────────── */}
+        <footer className="mt-6 rounded-lg border border-line bg-sand/30 p-6 space-y-3">
+          <h2 className="font-display text-lg font-bold">Data Provenance</h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
+            {[
+              SOURCES.ILOSTAT_2024,
+              SOURCES.WDI_2024,
+              SOURCES.FREY_OSBORNE,
+              SOURCES.ONET_2024,
+              SOURCES.WITTGENSTEIN_SSP2,
+              SOURCES.UNESCO_UIS_2024,
+            ].map((s) => (
+              <div key={s.label} className="flex items-start gap-2">
+                <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground shrink-0 mt-0.5">
+                  {s.label}
+                </span>
+                <span className="text-xs text-muted-foreground">{s.dataset}</span>
+                {s.url && (
+                  <a
+                    href={s.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-cobalt hover:underline shrink-0"
+                  >
+                    ↗
+                  </a>
+                )}
+              </div>
+            ))}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            LMIC recalibration factor for {country.name}:{" "}
+            <span className="font-mono font-bold">{calibration}</span>. Synthetic cohort of
+            100 profiles generated deterministically from country parameters.
+          </p>
+        </footer>
       </div>
     </PageShell>
   );

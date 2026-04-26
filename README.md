@@ -34,7 +34,7 @@ UNMAPPED is an open infrastructure layer that maps informal talent to real econo
 
 ## Live Demo
 
-**[joshuaaugustine.page/unmapped](https://joshuaaugustine.page/unmapped)**
+🔗 **[unmapped-global-hackathon.lovable.app](https://unmapped-global-hackathon.lovable.app)**
 
 ## Data Foundation
 

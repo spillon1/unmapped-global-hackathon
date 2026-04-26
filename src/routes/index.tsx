@@ -33,6 +33,7 @@ function Index() {
       <SiteNav />
       <Hero />
       <HowItWorks />
+      <JobMarketPulse />
       <ImpactStrip />
       <ProtocolNotProduct />
       <BuiltForAmara />
@@ -56,7 +57,7 @@ function Hero() {
       <div className="absolute inset-0 z-[1] bg-ink/70" aria-hidden="true" />
       <CulturalPattern opacity={0.04} size={120} />
 
-      <div className="relative z-[2] mx-auto flex min-h-[80vh] max-w-[1400px] flex-col items-center justify-center px-6 py-24 text-center">
+      <div className="relative z-[2] mx-auto flex min-h-[80vh] max-w-[1400px] flex-col items-center justify-center px-6 text-center py-12 md:py-24">
         <h1 className="font-display text-[clamp(3rem,8vw,7rem)] font-black leading-[0.95] tracking-tight text-paper">
           {t("hero.title", "UNMAPPED")}
         </h1>
@@ -120,7 +121,7 @@ function HowItWorks() {
   const { t } = useI18n();
   return (
     <section className="border-b border-line bg-paper">
-      <div className="mx-auto max-w-[1400px] px-6 py-20">
+      <div className="mx-auto max-w-[1400px] px-6 py-12 md:py-20">
         <div className="text-center">
           <div className="text-xs font-semibold uppercase tracking-[0.2em] text-cobalt">
             How it works
@@ -130,7 +131,7 @@ function HowItWorks() {
           </h2>
         </div>
 
-        <div className="mt-14 grid gap-8 md:grid-cols-3">
+        <div className="mt-14 grid grid-cols-1 gap-8 md:grid-cols-3">
           {STEPS.map((step, i) => (
             <div key={i} className="flex flex-col items-center text-center">
               <div className="flex h-20 w-20 items-center justify-center rounded-full bg-cobalt/10 text-4xl">
@@ -147,6 +148,61 @@ function HowItWorks() {
               </p>
             </div>
           ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/* ─── Job Market Pulse ─────────────────────────────────────────────────── */
+
+function JobMarketPulse() {
+  return (
+    <section className="border-b border-line bg-card">
+      <div className="mx-auto max-w-[1400px] px-6 py-12 md:py-16">
+        <div className="mx-auto max-w-3xl">
+          <div className="rounded-lg border-2 border-cobalt/20 bg-cobalt/5 p-6 md:p-8">
+            <div className="flex items-start gap-4">
+              <span
+                className="text-3xl shrink-0"
+                style={{ animation: "pulse 2s ease-in-out infinite" }}
+              >
+                🔍
+              </span>
+              <div className="space-y-3">
+                <h3 className="font-display text-xl font-black md:text-2xl">
+                  Live Job Intelligence
+                </h3>
+                <p className="text-sm leading-relaxed text-muted-foreground md:text-base">
+                  We scrape LinkedIn, Indeed, and Jobberman to show you real demand
+                  signals — not just theory, but which jobs are actually hiring in
+                  your country right now.
+                </p>
+                <div className="flex flex-wrap gap-4 pt-2">
+                  <div className="flex items-center gap-2">
+                    <span className="inline-block h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+                    <span className="text-xs font-semibold text-muted-foreground">
+                      Tracking <strong className="text-ink">374+</strong> occupation
+                      categories
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="inline-block h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+                    <span className="text-xs font-semibold text-muted-foreground">
+                      Across <strong className="text-ink">3</strong> major job
+                      platforms
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="inline-block h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+                    <span className="text-xs font-semibold text-muted-foreground">
+                      Updated <strong className="text-ink">April 2025</strong>
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </section>
@@ -284,7 +340,7 @@ function ProtocolNotProduct() {
 function BuiltForAmara() {
   return (
     <section className="border-b border-line bg-card">
-      <div className="mx-auto max-w-[1400px] px-6 py-20">
+      <div className="mx-auto max-w-[1400px] px-6 py-12 md:py-20">
         <div className="mx-auto max-w-2xl text-center">
           <div className="text-xs font-semibold uppercase tracking-[0.2em] text-cobalt">
             Built for real people
@@ -292,7 +348,7 @@ function BuiltForAmara() {
           <h2 className="mt-3 font-display text-3xl font-black md:text-4xl">
             Meet Amara.
           </h2>
-          <div className="mt-8 rounded-none border border-line bg-paper p-8 text-left">
+          <div className="mt-8 rounded-none border border-line bg-paper p-5 text-left md:p-8">
             <p className="text-lg leading-relaxed">
               Amara repairs phones in Lagos Market. She's 22, taught herself
               from YouTube. Is her livelihood at risk from AI? Where should she
